@@ -1,0 +1,38 @@
+# Python & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# PyInstaller Build Artifacts
+build/
+dist/
+*.spec.bak
+
+# Large Binaries & Executables (Distribute via GitHub Releases)
+*.exe
+Sorti.exe
+
+# Local Data & Runtime State
+.sorti/
+history.json
+taxonomy.json
+extracted_icon.png
+dumped_icon.png
+
+# ML Model Cache (Downloaded on first run if building from source)
+model_cache/
+
+# Benchmark temporary files
+benchmark_models/
+benchmark_results.json
+benchmark_runner.py
+run_benchmark.py
+scratch_extract.py
+test_sorti_current.py
+generate_svg_chart.py
+visualize_benchmark.py
+benchmark_chart.svg
+benchmark_report.html

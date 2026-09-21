@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sorti — Course Materials Sorter & Explorer</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="top-header">
+      <div class="brand-group">
+        <div class="logo-badge" style="background: transparent; box-shadow: none; padding: 0;">
+          <img src="logo.png" alt="Sorti" style="width: 32px; height: 32px; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(56, 189, 248, 0.35));">
+        </div>
+        <div>
+          <div class="brand-title">Sorti <span class="version-tag">AI Semantic</span></div>
+          <div class="brand-subtitle" id="studyRootLabel">Study Root: Loading...</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div id="triageIndicator" class="triage-pill hidden" onclick="scrollToTriage()">
+          <span class="pulsing-dot"></span>
+          <span id="triageCountText">0 Files Need Direction</span>
+        </div>
+        <button id="undoBtn" class="btn btn-secondary" onclick="undoLastMove()" disabled title="Undo last action">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7v6h6"></path>
+            <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path>
+          </svg>
+          Undo
+        </button>
+        <button id="sortAllBtn" class="btn btn-primary" onclick="sortAllAuto()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline>
+          </svg>
+          ⚡ Sweep Intake (<span id="autoCountBadge">0</span>)
+        </button>
+        <button id="exitBtn" class="btn btn-ghost" onclick="exitApp()" title="Close Sorti App">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+            <line x1="12" y1="2" x2="12" y2="12"></line>
+          </svg>
+          Exit
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Dual-Pane Workspace -->
+    <main class="workspace-grid">
+      
+      <!-- Left Column: Course & Folder Explorer -->
+      <section class="panel explorer-panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Course & Subfolder Explorer</h2>
+            <p class="panel-description">Subfolders on disk. Contents are strictly immune & never overwritten.</p>
+          </div>
+          <button class="btn btn-sm btn-outline" onclick="openCreateFolderModal()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            + New Course
+          </button>
+        </div>
+
+        <div id="courseTreeContainer" class="course-tree">
+          <div class="empty-state">Scanning study directory...</div>
+        </div>
+      </section>
+
+      <!-- Right Column: Intake & Triage Control -->
+      <section class="panel intake-panel">
+        <!-- Triage Alert Section (Shown prominently when files need direction) -->
+        <div id="triageSection" class="triage-card hidden">
+          <div class="triage-card-header">
+            <div class="triage-icon-title">
+              <div class="warning-icon">⚠️</div>
+              <div>
+                <h3 class="triage-heading">Triage Required</h3>
+                <p class="triage-subtext">These documents in the main folder had ambiguous course matches. Tell Sorti where to file them with one click.</p>
+              </div>
+            </div>
+          </div>
+          <div id="triageList" class="triage-items">
+            <!-- Populated via JS -->
+          </div>
+        </div>
+
+        <!-- Incoming Files in Main Folder -->
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Main Folder Intake (<span id="incomingCountTotal">0</span>)</h2>
+            <p class="panel-description">Files sitting in the main folder awaiting sorting and PDF conversion.</p>
+          </div>
+          <button class="btn btn-sm btn-ghost" onclick="loadStatus()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            Refresh
+          </button>
+        </div>
+
+        <div id="incomingFilesContainer" class="incoming-files-list">
+          <div class="empty-state">No unsorted files in main folder. Everything is organized!</div>
+        </div>
+
+        <!-- Recent Audit History -->
+        <div class="history-section">
+          <h3 class="history-title">Recent Activity</h3>
+          <div id="historyList" class="history-list">
+            <div class="history-empty">No recent sorting operations.</div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Create Folder Modal -->
+  <div id="createFolderModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modalTitle">Create New Course / Folder</h3>
+        <button class="close-btn" onclick="closeCreateFolderModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="input-label" for="newFolderPath">Folder Path (e.g. <code>Jurisprudence</code> or <code>Jurisprudence/Seminar 1</code>)</label>
+        <input type="text" id="newFolderPath" class="text-input" placeholder="e.g. Commercial Law/Lectures">
+        <p class="input-hint">Will be created directly inside your study folder on disk.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeCreateFolderModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitCreateFolder()">Create Folder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick-Search Destination Picker Modal -->
+  <div id="destPickerModal" class="modal-overlay hidden">
+    <div class="modal-card picker-modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Select Destination Folder</h3>
+          <p class="picker-file-subtitle" id="pickerFileName">document.docx</p>
+        </div>
+        <button class="close-btn" onclick="closeDestPicker()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- AI Top Alternative Matches -->
+        <div id="pickerAiSection" class="picker-ai-section hidden">
+          <div class="picker-section-label">⚡ AI Candidate Alternatives:</div>
+          <div id="pickerAiChips" class="picker-ai-chips"></div>
+        </div>
+
+        <!-- Instant Search Input -->
+        <div class="picker-search-box">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="destSearchInput" class="text-input picker-search-input" placeholder="Type to filter courses or seminars... (e.g. 'Titus', 'Banking')" oninput="filterDestPickerTree()">
+        </div>
+
+        <!-- Hierarchical Folder Tree List -->
+        <div id="destTreeList" class="picker-tree-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeDestPicker()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
