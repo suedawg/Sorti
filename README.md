@@ -43,7 +43,7 @@ If you want to contribute or build Sorti yourself:
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/Sorti.git
+git clone https://github.com/suedawg/Sorti.git
 cd Sorti
 
 # Create virtual environment
