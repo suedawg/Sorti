@@ -40,7 +40,11 @@ hiddenimports = [
     'webview.platforms.edgechromium',
     'clr',
     'pythonnet',
-    'clr_loader'
+    'clr_loader',
+    'pypdfium2',
+    'winocr',
+    'pypdf',
+    'PIL',
 ] + fastembed_submodules + webview_submodules + pythonnet_submodules + clr_loader_submodules
 
 a = Analysis(
