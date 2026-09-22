@@ -16,6 +16,8 @@ Sorti is a standalone desktop application that automatically organizes messy dow
 
 - **Zero-Cloud, 100% Private**: Runs entirely on your laptop CPU using local ONNX embeddings (`BAAI/bge-small-en-v1.5`). No API keys, no subscriptions, and no internet required.
 - **Smart Two-Zone Sampling**: Reads both thesis summaries (pages 1-3) and deep structural topic headings (pages 4-20) for human-level categorization accuracy.
+- **Native OCR Fallback**: Automatically renders and scans Page 1 using Windows native OCR on image-only/scanned PDFs (photocopied law reports, archival texts) with zero extra binary weight.
+- **In-App Release Notifications**: Subtle in-app header badge alerts you when updates or bug fixes are published on GitHub.
 - **Active Learning**: Learns from your custom manual overrides and preserves folder taxonomy automatically.
 - **Native Desktop App**: Runs in a standalone window with Windows 11 Snap Layouts, high-DPI scaling, and drag-and-drop file ingestion.
 
@@ -51,7 +53,7 @@ python -m venv .venv
 .venv\Scripts\activate
 
 # Install dependencies
-pip install pywebview fastembed onnxruntime pypdf pillow pyinstaller pythonnet
+pip install pywebview fastembed onnxruntime pypdf pillow pyinstaller pythonnet pypdfium2 winocr
 ```
 
 ### Run Locally (Development)
@@ -59,11 +61,21 @@ pip install pywebview fastembed onnxruntime pypdf pillow pyinstaller pythonnet
 python app.py
 ```
 
-### Build Standalone Executable
+### Build Lightweight Installer (Inno Setup — ~120 MB)
+```bash
+# 1. Compile directory build
+pyinstaller Sorti.onedir.spec --noconfirm
+
+# 2. Compile Inno Setup installer
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" Sorti.iss
+```
+The installer will be generated at `dist-installer/Sorti-Setup-v1.1.0.exe`.
+
+### Build Standalone Executable (One-File Fallback)
 ```bash
 pyinstaller Sorti.spec --noconfirm
 ```
-The compiled single-file binary will be generated at `dist/Sorti.exe`.
+The single-file binary will be generated at `dist/Sorti.exe`.
 
 ---
 

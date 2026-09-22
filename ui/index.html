@@ -19,12 +19,16 @@
           <img src="logo.png" alt="Sorti" style="width: 32px; height: 32px; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(56, 189, 248, 0.35));">
         </div>
         <div>
-          <div class="brand-title">Sorti <span class="version-tag">AI Semantic</span></div>
+          <div class="brand-title">Sorti <span class="version-tag">v1.1.0</span></div>
           <div class="brand-subtitle" id="studyRootLabel">Study Root: Loading...</div>
         </div>
       </div>
 
       <div class="header-actions">
+        <button id="updatePill" class="update-pill hidden" type="button" onclick="openRelease()" title="Open the latest GitHub release">
+          <span class="update-spark" aria-hidden="true">✨</span>
+          <span id="updatePillText">Update available</span>
+        </button>
         <div id="triageIndicator" class="triage-pill hidden" onclick="scrollToTriage()">
           <span class="pulsing-dot"></span>
           <span id="triageCountText">0 Files Need Direction</span>

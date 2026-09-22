@@ -11,8 +11,10 @@ let latestStatusData = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   loadAll();
+  checkUpdate();
   // Poll every 5 seconds for new downloads in root folder
   setInterval(loadStatus, 5000);
+  setInterval(checkUpdate, 15 * 60 * 1000);
 
   // Close modals on Escape key
   document.addEventListener("keydown", (e) => {
@@ -166,7 +168,7 @@ function renderTriageList(triageFiles) {
     return `
       <div class="triage-item-card">
         <div class="triage-item-top">
-          <div class="triage-filename">📄 ${escapeHtml(file.filename)}</div>
+          <div class="triage-filename">📄 ${escapeHtml(file.filename)}${file.ocr_fallback ? '<span class="ocr-chip">OCR p.1</span>' : ''}</div>
           <span class="destination-tag dest-tag-clickable ${isOverridden ? 'dest-override-pill' : 'tag-triage'}"
                 onclick="openDestPickerForFile('${escapeJsString(file.filename)}')">
             ${dest ? `→ ${escapeHtml(dest)}` : '📁 Select Destination...'} ✏️
@@ -207,7 +209,7 @@ function renderIncomingFiles(files) {
             <polyline points="14 2 14 8 20 8"></polyline>
           </svg>
           <div>
-            <div class="file-name">${escapeHtml(file.filename)}</div>
+            <div class="file-name">${escapeHtml(file.filename)}${file.ocr_fallback ? '<span class="ocr-chip">OCR p.1</span>' : ''}</div>
             ${file.snippet ? `<div style="font-size: 11px; color: var(--text-muted); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(file.snippet)}</div>` : ''}
           </div>
         </div>
@@ -533,4 +535,35 @@ async function exitApp() {
     await fetch("/api/shutdown", { method: "POST" });
   } catch (e) {}
   window.close();
+}
+
+async function checkUpdate() {
+  try {
+    const res = await fetch("/api/check_update");
+    if (!res.ok) return;
+    const data = await res.json();
+    const pill = document.getElementById("updatePill");
+    const label = document.getElementById("updatePillText");
+    if (!pill || !label) return;
+    if (data && data.has_update && data.latest_version) {
+      const version = String(data.latest_version).replace(/^v/i, "");
+      label.textContent = `Update v${version} available`;
+      pill.classList.remove("hidden");
+      pill.dataset.url = data.release_url || "";
+    } else {
+      pill.classList.add("hidden");
+    }
+  } catch (err) {
+    // Update checks are best-effort; never interrupt sorting.
+  }
+}
+
+async function openRelease() {
+  try {
+    await fetch("/api/open_release", { method: "POST" });
+  } catch (err) {
+    const pill = document.getElementById("updatePill");
+    const url = pill && pill.dataset.url;
+    if (url) window.open(url, "_blank", "noopener");
+  }
 }

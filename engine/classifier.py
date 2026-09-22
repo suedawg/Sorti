@@ -9,6 +9,12 @@ from pathlib import Path
 import zipfile
 import re
 import json
+import os
+import sys
+import tempfile
+import threading
+import subprocess
+import shutil
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Optional, Tuple, Set
 
@@ -51,6 +57,257 @@ ACADEMIC_STOPWORDS = {
     # Academic discourse & meta unigrams (prevents generic unigrams like 'language' or 'words' from bleeding across folders)
     'language', 'words', 'study', 'ideas', 'criticism', 'theory', 'forms', 'uses', 'notes', 'introduction', 'text', 'texts'
 }
+
+# Scanned photocopy / archival PDF: pypdf extract_text() is empty or near-empty.
+OCR_EMPTY_WORD_THRESHOLD = 30
+_OCR_LOCK = threading.Lock()
+_RAPIDOCR_ENGINE = None
+
+
+def _word_count(text: str) -> int:
+    return len((text or "").split())
+
+
+def _render_pdf_page1(file_path: Path):
+    """
+    Render page 1 of a PDF to a PIL RGB image.
+    Prefers pypdfium2 (small wheel, no Poppler/Tesseract binary). Falls back to PyMuPDF.
+    Returns None on any failure. Never raises.
+    """
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(file_path))
+        try:
+            if len(doc) < 1:
+                return None
+            page = doc[0]
+            bitmap = page.render(scale=144.0 / 72.0)
+            img = bitmap.to_pil()
+            return img.convert("RGB") if getattr(img, "mode", "RGB") != "RGB" else img
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        import io
+        import fitz  # PyMuPDF
+        from PIL import Image
+        doc = fitz.open(str(file_path))
+        try:
+            if doc.page_count < 1:
+                return None
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            return Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
+def _ocr_windows_winocr(pil_image) -> str:
+    """Windows.Media.Ocr via the optional `winocr` package. Never raises."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winocr
+        if hasattr(winocr, "recognize_pil_sync"):
+            result = winocr.recognize_pil_sync(pil_image)
+        else:
+            import asyncio
+
+            async def _run():
+                return await winocr.recognize_pil(pil_image)
+
+            try:
+                result = asyncio.run(_run())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(_run())
+                finally:
+                    loop.close()
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            return result.strip()
+        text = getattr(result, "text", None)
+        if text:
+            return str(text).strip()
+        if isinstance(result, dict):
+            return str(result.get("text") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _ocr_windows_powershell(pil_image) -> str:
+    """
+    Windows 10/11 native OCR via Windows.Media.Ocr (PowerShell WinRT).
+    No Tesseract binary, no extra Python wheels required.
+    """
+    if sys.platform != "win32":
+        return ""
+    tmp_png = None
+    tmp_ps1 = None
+    try:
+        fd, tmp_png = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        pil_image.save(tmp_png, format="PNG")
+
+        script = """param([string]$ImagePath)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+    Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+    })[0]
+function Await-WinRT($WinRtTask, $ResultType) {
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
+}
+$null = [Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
+$file   = Await-WinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
+$stream = Await-WinRT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await-WinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmap = Await-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+if (-not $engine) { return }
+$result = Await-WinRT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+Write-Output $result.Text
+"""
+        fd, tmp_ps1 = tempfile.mkstemp(suffix=".ps1")
+        os.close(fd)
+        with open(tmp_ps1, "w", encoding="utf-8") as handle:
+            handle.write(script)
+
+        creationflags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy", "Bypass",
+                "-File", tmp_ps1,
+                "-ImagePath", tmp_png,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            creationflags=creationflags,
+        )
+        if proc.returncode != 0:
+            return ""
+        return (proc.stdout or "").strip()
+    except Exception:
+        return ""
+    finally:
+        for path in (tmp_png, tmp_ps1):
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
+
+def _ocr_rapidocr(pil_image) -> str:
+    """Lightweight ONNX OCR (reuses Sorti's existing onnxruntime). Optional extra."""
+    global _RAPIDOCR_ENGINE
+    try:
+        import numpy as np
+        with _OCR_LOCK:
+            if _RAPIDOCR_ENGINE is None:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                except Exception:
+                    from rapidocr_onnx import RapidOCR  # newer package name
+                _RAPIDOCR_ENGINE = RapidOCR()
+            engine = _RAPIDOCR_ENGINE
+        arr = np.array(pil_image)
+        result = engine(arr)
+        lines = result[0] if isinstance(result, tuple) else result
+        if not lines:
+            return ""
+        texts = []
+        for line in lines:
+            if isinstance(line, (list, tuple)) and len(line) >= 2:
+                texts.append(str(line[1]))
+            elif isinstance(line, dict) and line.get("text"):
+                texts.append(str(line["text"]))
+        return " ".join(texts).strip()
+    except Exception:
+        return ""
+
+
+def _ocr_pytesseract(pil_image) -> str:
+    """Last-resort Tesseract if the user already has it on PATH. Never required."""
+    try:
+        if not shutil.which("tesseract"):
+            return ""
+        import pytesseract
+        return (pytesseract.image_to_string(pil_image) or "").strip()
+    except Exception:
+        return ""
+
+
+def ocr_first_page(file_path: Path) -> str:
+    """
+    Render PDF page 1 and run OCR. Tries, in order:
+      1. Windows 10/11 native OCR (no extra binary)
+      2. RapidOCR ONNX (optional; shares onnxruntime with Sorti)
+      3. pytesseract only if Tesseract is already installed
+    Returns "" on any failure. Never raises.
+    """
+    try:
+        image = _render_pdf_page1(file_path)
+        if image is None:
+            return ""
+        max_w = 1800
+        try:
+            if getattr(image, "width", 0) > max_w:
+                ratio = max_w / float(image.width)
+                image = image.resize((max_w, max(1, int(image.height * ratio))))
+        except Exception:
+            pass
+
+        backends = (
+            _ocr_windows_winocr,
+            _ocr_windows_powershell,
+            _ocr_rapidocr,
+            _ocr_pytesseract,
+        )
+        for backend in backends:
+            try:
+                text = backend(image) or ""
+            except Exception:
+                text = ""
+            cleaned = " ".join(text.split())
+            if cleaned:
+                print(
+                    f"[Classifier] OCR ({backend.__name__}) recovered "
+                    f"{len(cleaned.split())} words from {file_path.name} p.1"
+                )
+                return cleaned
+        return ""
+    except Exception as exc:
+        print(f"[Classifier] OCR fallback skipped for {file_path.name}: {exc}")
+        return ""
 
 
 def extract_subfolder_phrases_and_topics(sub_name: str) -> Tuple[List[str], List[str]]:
@@ -225,7 +482,9 @@ class DocumentClassifier:
         Zone 1: First 3 pages (title, author, abstract, opening thesis).
         Zone 2: Section headers, structural markers, and play titles sampled across pages 4 to max_pages.
         Strips digital library/publisher cover sheet disclaimers.
+        Falls back to page-1 OCR when the text layer is empty or near-empty (< 30 words).
         """
+        self._last_ocr_fallback = False
         try:
             from pypdf import PdfReader
             reader = PdfReader(str(file_path))
@@ -283,13 +542,42 @@ class DocumentClassifier:
             cleaned = re.sub(r'\s+', ' ', cleaned).strip()
 
             words = cleaned.split()[:max_words]
-            return " ".join(words)
+            extracted = " ".join(words)
+
+            # Automatic OCR fallback for scanned photocopies / archival PDFs
+            # (vintage law reports, literature facsimiles, Moodle phone-scans).
+            # Page 1 only — classification only needs title / author / heading.
+            self._last_ocr_fallback = False
+            if _word_count(extracted) < OCR_EMPTY_WORD_THRESHOLD:
+                ocr_text = self._ocr_first_page(file_path)
+                if ocr_text:
+                    self._last_ocr_fallback = True
+                    merged = (ocr_text + " " + extracted).strip()
+                    return " ".join(merged.split()[:max_words])
+            return extracted
         except Exception as e:
             print(f"[Classifier] PDF preview note on {file_path.name}: {e}")
+            try:
+                ocr_text = self._ocr_first_page(file_path)
+                if ocr_text:
+                    self._last_ocr_fallback = True
+                    return " ".join(ocr_text.split()[:max_words])
+            except Exception:
+                pass
+            self._last_ocr_fallback = False
             return ""
+
+    def _extract_pdf_text(self, file_path: Path, max_pages: int = 20, max_words: int = 4000) -> str:
+        """Alias kept for callers / tests that target the text-layer extraction step."""
+        return self.extract_pdf_preview(file_path, max_pages=max_pages, max_words=max_words)
+
+    def _ocr_first_page(self, file_path: Path) -> str:
+        """Crash-proof page-1 OCR. See module-level ocr_first_page()."""
+        return ocr_first_page(file_path)
 
     def get_document_preview(self, file_path: Path) -> Tuple[str, str]:
         """Returns (document_text, short_preview_snippet) for UI display."""
+        self._last_ocr_fallback = False
         ext = file_path.suffix.lower()
         full_text = ""
         if ext in ('.docx', '.doc'):
@@ -385,6 +673,7 @@ class DocumentClassifier:
         """
         filename = file_path.name
         full_text, snippet = self.get_document_preview(file_path)
+        ocr_fallback = bool(getattr(self, "_last_ocr_fallback", False))
         search_corpus = f"{filename} {full_text}".lower()
 
         # Check Active Learning / User Rules first
@@ -414,7 +703,8 @@ class DocumentClassifier:
                 "is_ambiguous": False,
                 "ambiguity_reason": "",
                 "best_match": match_obj,
-                "candidates": [match_obj]
+                "candidates": [match_obj],
+                "ocr_fallback": ocr_fallback,
             }
 
         # Check compound rules (e.g. author + chapter/topic) and legacy stems
@@ -447,7 +737,8 @@ class DocumentClassifier:
                 "is_ambiguous": True,
                 "ambiguity_reason": "No courses found in taxonomy",
                 "best_match": None,
-                "candidates": []
+                "candidates": [],
+                "ocr_fallback": ocr_fallback,
             }
 
         # =========================================================================
@@ -770,5 +1061,6 @@ class DocumentClassifier:
             "is_ambiguous": is_ambiguous,
             "ambiguity_reason": ambiguity_reason,
             "best_match": best_match,
-            "candidates": candidates[:4]
+            "candidates": candidates[:4],
+            "ocr_fallback": ocr_fallback,
         }

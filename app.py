@@ -50,8 +50,115 @@ from engine.converter import OfficePdfConverter
 from engine.file_ops import SafeFileOps
 
 PORT = 5050
+APP_VERSION = "1.1.0"
+GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/suedawg/Sorti/releases/latest"
+GITHUB_RELEASES_PAGE = "https://github.com/suedawg/Sorti/releases/latest"
+UPDATE_CACHE_TTL_SEC = 3600
+UPDATE_HTTP_TIMEOUT_SEC = 4
+
+_update_lock = threading.Lock()
+_update_cache: Dict[str, Any] = {
+    "fetched_at": 0.0,
+    "has_update": False,
+    "latest_version": APP_VERSION,
+    "release_url": GITHUB_RELEASES_PAGE,
+}
+
+
+def _parse_semver(tag: str) -> Tuple[int, int, int]:
+    """Parse 'v1.2.3' / '1.2' into a comparable triple. Non-numeric tails are ignored."""
+    raw = (tag or "").strip()
+    if raw[:1].lower() == "v":
+        raw = raw[1:]
+    parts: List[int] = []
+    for chunk in raw.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+        if len(parts) == 3:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return parts[0], parts[1], parts[2]
+
+
+def _fetch_latest_release() -> None:
+    """Query GitHub Releases (unauthenticated, 60 req/hr). Never raises."""
+    try:
+        req = urllib.request.Request(
+            GITHUB_LATEST_RELEASE_URL,
+            headers={
+                "User-Agent": f"Sorti/{APP_VERSION} (+https://github.com/suedawg/Sorti)",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=UPDATE_HTTP_TIMEOUT_SEC) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        tag = str(payload.get("tag_name") or "").strip()
+        html_url = str(payload.get("html_url") or "").strip() or GITHUB_RELEASES_PAGE
+        latest = tag[1:] if tag[:1].lower() == "v" else tag
+        if not latest:
+            latest = APP_VERSION
+        has_update = _parse_semver(latest) > _parse_semver(APP_VERSION)
+        with _update_lock:
+            _update_cache.update({
+                "fetched_at": time.time(),
+                "has_update": has_update,
+                "latest_version": latest,
+                "release_url": html_url,
+            })
+        print(f"[Sorti Update] latest={latest} current={APP_VERSION} has_update={has_update}")
+    except Exception as exc:
+        print(f"[Sorti Update] Check skipped: {exc}")
+        with _update_lock:
+            # Soft-stamp the cache so a failed probe is not retried on every UI poll.
+            if not _update_cache["fetched_at"]:
+                _update_cache["fetched_at"] = time.time() - (UPDATE_CACHE_TTL_SEC - 120)
+
+
+def start_update_checker() -> None:
+    """Non-blocking daemon thread. Safe to call more than once."""
+    threading.Thread(
+        target=_fetch_latest_release,
+        daemon=True,
+        name="sorti-update-check",
+    ).start()
+
+
+def get_update_status() -> Dict[str, Any]:
+    """Return cached GitHub release comparison. Refresh in the background if stale (1h)."""
+    with _update_lock:
+        fetched_at = float(_update_cache["fetched_at"] or 0.0)
+        stale = (time.time() - fetched_at) >= UPDATE_CACHE_TTL_SEC
+        snapshot = {
+            "has_update": bool(_update_cache["has_update"]),
+            "latest_version": str(_update_cache["latest_version"]),
+            "release_url": str(_update_cache["release_url"]),
+        }
+    if stale:
+        start_update_checker()
+    return snapshot
+
+
+def open_latest_release() -> Dict[str, Any]:
+    """Launch the cached (or fallback) GitHub release URL in the system browser."""
+    status = get_update_status()
+    url = status.get("release_url") or GITHUB_RELEASES_PAGE
+    try:
+        webbrowser.open(url)
+        return {"success": True, "url": url}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "url": url}
+
 
 def get_base_dir() -> Path:
+
     """Returns directory where app or executable is located."""
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent.resolve()
@@ -256,6 +363,10 @@ class SortiRequestHandler(BaseHTTPRequestHandler):
             return
 
         # API Endpoints
+        if path == "/api/check_update":
+            self.send_json_response(get_update_status())
+            return
+
         if path == "/api/status":
             if not ENGINE_READY.is_set():
                 self.send_json_response({
@@ -323,8 +434,12 @@ class SortiRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
 
-        if not ENGINE_READY.is_set() and path != "/api/shutdown":
+        if not ENGINE_READY.is_set() and path not in ("/api/shutdown", "/api/open_release"):
             self.send_json_response({"error": "Engine is still warming up. Please try again in a moment."}, status=503)
+            return
+
+        if path == "/api/open_release":
+            self.send_json_response(open_latest_release())
             return
 
         if path == "/api/folders/create":
@@ -601,6 +716,9 @@ def run_server(no_browser: bool = False):
 
     # Start background engine warm-up (classifier, taxonomy, converter)
     threading.Thread(target=init_engine, daemon=True).start()
+
+    # Non-blocking GitHub Releases check (cached 1h, never blocks the UI)
+    start_update_checker()
 
     if no_browser:
         try:
